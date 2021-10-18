@@ -1,12 +1,12 @@
 import bluetooth
+import select
 import time
-from picamera import PiCamera
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import datetime
-import smtplib
 import RPi.GPIO as GPIO
+
+# Relay Channels
+Relay_Ch1 = 26
+Relay_Ch2 = 20
+Relay_Ch3 = 21
 
 # length of time taken to scan for bluetooth devices
 search_time = 5
@@ -14,12 +14,6 @@ search_time = 5
 my_blue_address = '8C:86:1E:B1:65:F1'
 # Bluetooth addresses to ignor so duplicated emails wont be sent
 ignor_address = ['60:A3:7D:D5:E9:C1']
-
-
-# Email details
-from_email = 'raspicam314@gmail.com'
-from_password = 'password3.14'
-to_email = 'raspicam314@gmail.com'
 
 # Method to check if a discovered address is in the ignor_address list
 
@@ -39,9 +33,6 @@ def listContains(ignor_address, addr):
 
 
 def doorLock(status):
-
-    Relay_Ch1 = 26
-
     GPIO.output(Relay_Ch1, status)
 
     # Clear GPIO
@@ -53,7 +44,7 @@ def doorLock(status):
 
 def stopwatch(seconds):
     start = time.time()
-    time.clock()
+    time.time.perf_counter()
     elapsed = 0
     while elapsed < seconds:
         elapsed = time.time() - start
@@ -63,78 +54,106 @@ def stopwatch(seconds):
 # Method used to take picture and send it via email when unknown device is
 # discoved
 
+class MyDiscoverer(bluetooth.DeviceDiscoverer):
 
-def sendEmail(from_email, from_password, to_email):
-    camera = PiCamera()
-    timeCaptured = '/home/pi/Desktop/Camera/Pic' + \
-        datetime.datetime.now().strftime('%Y-%m-%d%H:%M:%S') + '.png'
-    camera.rotation = 180
-    camera.capture(timeCaptured)
+    def pre_inquiry(self):
+        self.done = False
 
-    print("Image Captured")
+    def device_discovered(self, address, device_class, rssi, name):
+        print("%s - %s" % (address, name))
 
-    # Message to be sent
-    msg = MIMEMultipart()
-    msg['From'] = from_email
-    msg['To'] = to_email
-    msg['Subject'] = 'Unknown Device Detected'
-    body = 'There has been an unknown bluetooth device detected in the vicinity.'
-    msg.attach(MIMEText(body, 'plain'))
+        # get some information out of the device class and display it.
+        # voodoo magic specified at:
+        #
+        # https://www.bluetooth.org/foundry/assignnumb/document/baseband
+        major_classes = ("Miscellaneous",
+                         "Computer",
+                         "Phone",
+                         "LAN/Network Access point",
+                         "Audio/Video",
+                         "Peripheral",
+                         "Imaging")
+        major_class = (device_class >> 8) & 0xf
+        if major_class < 7:
+            print("  %s" % major_classes[major_class])
+        else:
+            print("  Uncategorized")
 
-    # Attach the image to the message
-    attachment = open(timeCaptured, 'rb')
-    image = MIMEImage(attachment.read())
-    msg.attach(image)
+        print("  services:")
+        service_classes = ((16, "positioning"),
+                           (17, "networking"),
+                           (18, "rendering"),
+                           (19, "capturing"),
+                           (20, "object transfer"),
+                           (21, "audio"),
+                           (22, "telephony"),
+                           (23, "information"))
 
-    # Connect to server and send the email
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.ehlo()
-    server.starttls()
-    server.ehlo()
-    server.login(from_email, from_password)
-    server.sendmail(from_email, to_email, msg.as_string())
-    server.quit()
-    print("Email sent")
-# -------------------------------------------------------------------------------------------------------------
+        for bitpos, classname in service_classes:
+            if device_class & (1 << (bitpos-1)):
+                print("    %s" % classname)
+        print("  RSSI: " + str(rssi))
+
+    def inquiry_complete(self):
+        self.done = True
 
 
 while True:
-    print('Searching for devices.....')
-    Relay_Ch1 = 26
-    Relay_Ch2 = 20
-    Relay_Ch3 = 21
+    d = MyDiscoverer()
+    d.find_devices(lookup_names=True)
 
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
+    readfiles = [d, ]
 
-    GPIO.setup(Relay_Ch1, GPIO.OUT)
-    GPIO.setup(Relay_Ch2, GPIO.OUT)
-    GPIO.setup(Relay_Ch3, GPIO.OUT)
-  # Search for all discoverable bluetooth devices
-    all_devices = bluetooth.discover_devices(
-        duration=search_time, flush_cache=True, lookup_names=True)
+    while True:
+        rfds = select.select(readfiles, [], [])[0]
 
-   # Check if any devices were found
-    if len(all_devices) > 0:
-        # loop through all_devices and check the addresses
-        for addr, name in all_devices:
-            # print out the name and address of each device
-            print('Name: ' + name + ' - Address: ' + addr)
+        if d in rfds:
+            d.process_event()
 
-            # if the detected address is the same aas my_blue_address
-            if addr == my_blue_address:
-                doorLock(GPIO.LOW)
-                print('Door Unlocked')
-                stopwatch(5)
-                doorLock(GPIO.HIGH)
-                print('Door Locked')
+        if d.done:
+            break
+        
+#     print('Searching for devices.....')
 
-            elif listContains(ignor_address, addr) == False:
-                # Take picture and send email to owner
-                # sendEmail(from_email, from_password, to_email)
-                # Add address to ignor list to avoid sending duplicated
-                # emails
-                ignor_address.append(addr)
+#     GPIO.setwarnings(False)
+#     GPIO.setmode(GPIO.BCM)
 
-    else:
-        print('No devices found, ensure your bluetooth is discoverable')
+#     GPIO.setup(Relay_Ch1, GPIO.OUT)
+#     GPIO.setup(Relay_Ch2, GPIO.OUT)
+#     GPIO.setup(Relay_Ch3, GPIO.OUT)
+
+#     # default open switches
+
+#     GPIO.output(Relay_Ch1, GPIO.HIGH)
+#     GPIO.output(Relay_Ch2, GPIO.HIGH)
+#     GPIO.output(Relay_Ch3, GPIO.HIGH)
+
+#   # Search for all discoverable bluetooth devices
+#     all_devices = bluetooth.discover_devices(
+#         duration=search_time, flush_cache=True, lookup_names=True)
+
+#    # Check if any devices were found
+#     if len(all_devices) > 0:
+#         # loop through all_devices and check the addresses
+#         for addr, name in all_devices:
+#             # print out the name and address of each device
+#             print('Name: ' + name + ' - Address: ' + addr)
+
+#             # if the detected address is the same aas my_blue_address
+#             if addr == my_blue_address:
+#                 doorLock(GPIO.LOW)
+#                 print('Door Unlocked')
+#                 stopwatch(5)
+#                 doorLock(GPIO.HIGH)
+#                 print('Door Locked')
+
+#             elif listContains(ignor_address, addr) == False:
+#                 # Take picture and send email to owner
+#                 # sendEmail(from_email, from_password, to_email)
+#                 # Add address to ignor list to avoid sending duplicated
+#                 # emails
+#                 ignor_address.append(addr)
+
+#     else:
+#         print('No devices found, ensure your bluetooth is discoverable')
+
